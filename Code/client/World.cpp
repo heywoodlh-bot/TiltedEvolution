@@ -69,6 +69,7 @@ void World::Update() noexcept
     const auto cDeltaSeconds = std::chrono::duration_cast<std::chrono::duration<double>>(cDelta).count();
 
     m_dispatcher.trigger(PreUpdateEvent(cDeltaSeconds));
+    ctx().at<InputService>().Update();
 
     // Force run this before so we get the tasks scheduled to run
     m_runner.OnUpdate(UpdateEvent(cDeltaSeconds));

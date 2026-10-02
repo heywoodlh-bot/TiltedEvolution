@@ -24,6 +24,13 @@
       >
         {{ 'COMPONENT.ROOT.CONNECT' | transloco }}
       </button>
+      <button
+        *ngIf="!(connected$ | async) && !(connectionInProgress$ | async) && hasSavedConnection()"
+        data-style-ornament="inverted"
+        (click)="reconnect()"
+      >
+        {{ 'COMPONENT.ROOT.RECONNECT' | transloco }}
+      </button>
       <ng-container *ngIf="connected$ | async">
         <button
           data-style-ornament="inverted"
@@ -32,15 +39,6 @@
         >
           {{ 'COMPONENT.ROOT.DISCONNECT' | transloco }}
         </button>
-        <!--
-        <button
-          data-style-ornament="inverted"
-          [attr.data-style-active]="(view | async) === RootView.RECONNECT"
-          (click)="reconnect()"
-        >
-          {{ 'COMPONENT.ROOT.RECONNECT' | transloco }}
-        </button>
-        -->
         <button
           data-style-ornament="inverted"
           [attr.data-style-active]="(view$ | async) === RootView.PLAYER_MANAGER"

@@ -4,6 +4,7 @@
 #include <DInputHook.hpp>
 
 #include <Services/OverlayClient.h>
+#include <Services/InputService.h>
 #include <Services/TransportService.h>
 
 #include <Messages/SendChatMessageRequest.h>
@@ -157,6 +158,7 @@ void OverlayClient::SetUIVisible(bool aVisible) noexcept
         return;
 
     TiltedPhoques::DInputHook::Get().SetEnabled(aVisible);
+    InputService::SetGameInputBlocked(aVisible);
     World::Get().GetOverlayService().SetActive(aVisible);
     pRenderer->SetCursorVisible(aVisible);
 }

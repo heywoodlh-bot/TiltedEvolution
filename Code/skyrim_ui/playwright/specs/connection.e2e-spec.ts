@@ -91,6 +91,20 @@ test.describe('Connection', () => {
     await expect(page.locator('//app-connect/div[1]/input[2]')).toHaveValue(password);
   });
 
+  test('Reconnects to the saved server from the root menu', async ({ page }) => {
+    await page.evaluate(() => {
+      localStorage.setItem('last_connected_address', 't-password');
+      localStorage.setItem('last_connected_password', 'test');
+    });
+    await page.reload();
+    await page.waitForSelector('.app-root-controls', { state: 'attached' });
+    await page.press('body', 'F2');
+    await page.waitForSelector('.app-root-controls', { state: 'visible' });
+
+    await page.getByRole('button', { name: 'Reconnect', exact: true }).click();
+    await expect.poll(() => page.evaluate('skyrimtogether.connected')).toBeTruthy();
+  });
+
   test('Connect & Disconnect', async ({ page }) => {
     await test.step('connect', async () => {
       await page.locator('//app-connect/div[1]/input[1]').fill('t-password');

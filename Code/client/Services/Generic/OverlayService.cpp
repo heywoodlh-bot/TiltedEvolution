@@ -3,6 +3,7 @@
 #include <Services/OverlayService.h>
 
 #include <OverlayApp.hpp>
+#include <DInputHook.hpp>
 
 #include <D3D11Hook.hpp>
 #include <OverlayRenderHandlerD3D11.hpp>
@@ -12,6 +13,7 @@
 #include <World.h>
 
 #include <Services/OverlayClient.h>
+#include <Services/InputService.h>
 #include <Services/TransportService.h>
 
 #include <Messages/NotifyChatMessageBroadcast.h>
@@ -213,9 +215,11 @@ void OverlayService::SetInGame(bool aInGame) noexcept
     }
     else
     {
+        TiltedPhoques::DInputHook::Get().SetEnabled(false);
+        InputService::SetGameInputBlocked(false);
+        m_active = false;
+        m_inGame = false;
         m_pOverlay->ExecuteAsync("exitGame");
-        // TODO: this does nothing, since m_inGame is false
-        SetActive(false);
     }
 }
 

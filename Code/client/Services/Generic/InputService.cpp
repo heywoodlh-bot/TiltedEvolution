@@ -1,5 +1,13 @@
 #include <TiltedOnlinePCH.h>
 
+#include <array>
+#include <filesystem>
+
+#include <xinput.h>
+
+#include <base/simpleini/SimpleIni.h>
+#include <input/GamepadBindings.h>
+
 #include <Services/InputService.h>
 #include <Services/OverlayService.h>
 
@@ -14,9 +22,121 @@
 #include <World.h>
 
 #include "Games/Skyrim/Interface/MenuControls.h"
+#include "Games/Skyrim/AI/Movement/PlayerControls.h"
 
 static OverlayService* s_pOverlay = nullptr;
 static UINT s_currentACP = CP_ACP;
+static bool s_gameInputStateSaved = false;
+static bool s_gameInputWasBlocked = false;
+
+namespace
+{
+constexpr char kGamepadConfigPath[] = "Data/SkyrimTogetherReborn/config";
+constexpr char kGamepadConfigFile[] = "Gamepad.ini";
+constexpr char kGamepadConfigSection[] = "Gamepad";
+constexpr char kGamepadConfigComment[] =
+    "; Controls for the Skyrim Together overlay.\n"
+    "; Use one of: NONE, DPAD_UP, DPAD_DOWN, DPAD_LEFT, DPAD_RIGHT, START, BACK,\n"
+    "; LEFT_THUMB, RIGHT_THUMB, LEFT_SHOULDER, RIGHT_SHOULDER, A, B, X, Y.\n"
+    "; The overlay opens when both ToggleModifier and ToggleButton are held.";
+
+using TXInputGetState = DWORD(WINAPI*)(DWORD, XINPUT_STATE*);
+
+TXInputGetState GetXInputGetState() noexcept
+{
+    static const TXInputGetState s_getState = []() -> TXInputGetState
+    {
+        constexpr std::array kLibraries{"xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll", "xinput1_2.dll", "xinput1_1.dll"};
+        for (const auto* pLibrary : kLibraries)
+        {
+            const auto module = LoadLibraryA(pLibrary);
+            if (!module)
+                continue;
+
+            const auto getState = reinterpret_cast<TXInputGetState>(GetProcAddress(module, "XInputGetState"));
+            if (getState)
+                return getState;
+
+            FreeLibrary(module);
+        }
+
+        return nullptr;
+    }();
+
+    return s_getState;
+}
+
+std::filesystem::path GetGamepadConfigPath()
+{
+    return std::filesystem::current_path() / kGamepadConfigPath / kGamepadConfigFile;
+}
+
+void CreateDefaultGamepadConfig(const std::filesystem::path& acPath)
+{
+    std::error_code error;
+    std::filesystem::create_directories(acPath.parent_path(), error);
+    if (error)
+        return;
+
+    CSimpleIni ini(true);
+    ini.SetValue(kGamepadConfigSection, nullptr, nullptr, kGamepadConfigComment);
+    ini.SetValue(kGamepadConfigSection, "ToggleModifier", "BACK");
+    ini.SetValue(kGamepadConfigSection, "ToggleButton", "START");
+    ini.SaveFile(acPath.c_str(), true);
+}
+
+GamepadBindings::ToggleBinding LoadGamepadToggleBinding() noexcept
+{
+    GamepadBindings::ToggleBinding binding;
+
+    try
+    {
+        const auto path = GetGamepadConfigPath();
+        std::error_code error;
+        if (!std::filesystem::exists(path, error))
+            CreateDefaultGamepadConfig(path);
+        if (error)
+            return binding;
+
+        CSimpleIni ini(true);
+        if (const auto result = ini.LoadFile(path.c_str()); result != SI_Error::SI_OK)
+        {
+            spdlog::warn("Failed to load gamepad configuration from '{}' (error {})", path.string(), static_cast<int>(result));
+            return binding;
+        }
+
+        const auto modifier = GamepadBindings::ParseButton(ini.GetValue(kGamepadConfigSection, "ToggleModifier", "BACK"));
+        const auto button = GamepadBindings::ParseButton(ini.GetValue(kGamepadConfigSection, "ToggleButton", "START"));
+        if (!modifier || !button || *button == GamepadBindings::Button::None)
+        {
+            spdlog::warn("Invalid gamepad toggle binding in '{}'; using BACK+START", path.string());
+            return binding;
+        }
+
+        binding.Modifier = *modifier;
+        binding.Primary = *button;
+    }
+    catch (...)
+    {
+        spdlog::warn("Failed to initialize gamepad configuration; using BACK+START");
+    }
+
+    return binding;
+}
+
+int8_t GetGamepadNavigation(const XINPUT_GAMEPAD& acGamepad) noexcept
+{
+    if ((acGamepad.wButtons & XINPUT_GAMEPAD_DPAD_LEFT) || acGamepad.sThumbLX < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE)
+        return -1;
+    if ((acGamepad.wButtons & XINPUT_GAMEPAD_DPAD_UP) || acGamepad.sThumbLY > XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE)
+        return -1;
+    if ((acGamepad.wButtons & XINPUT_GAMEPAD_DPAD_RIGHT) || acGamepad.sThumbLX > XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE)
+        return 1;
+    if ((acGamepad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) || acGamepad.sThumbLY < -XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE)
+        return 1;
+    return 0;
+}
+} // namespace
 
 void ForceKillAllInput()
 {
@@ -100,6 +220,7 @@ bool IsDisableKey(int aKey) noexcept
 void SetUIActive(OverlayService& aOverlay, auto apRenderer, bool aActive)
 {
     TiltedPhoques::DInputHook::Get().SetEnabled(aActive);
+    InputService::SetGameInputBlocked(aActive);
     aOverlay.SetActive(aActive);
 
     // Ensures the game is actually loaded, in case the initial event was sent too early
@@ -111,6 +232,40 @@ void SetUIActive(OverlayService& aOverlay, auto apRenderer, bool aActive)
     // This is to disable the Windows cursor
     while (ShowCursor(FALSE) >= 0)
         ;
+}
+
+void InjectCefKey(const uint16_t aKey, const uint32_t aModifiers = EVENTFLAG_NONE)
+{
+    if (!s_pOverlay || !s_pOverlay->GetActive())
+        return;
+
+    const auto pApp = s_pOverlay->GetOverlayApp();
+    if (!pApp)
+        return;
+
+    const auto scanCode = static_cast<uint16_t>(MapVirtualKey(aKey, MAPVK_VK_TO_VSC));
+    pApp->InjectKey(KEYEVENT_KEYDOWN, aModifiers, aKey, scanCode);
+    pApp->InjectKey(KEYEVENT_KEYUP, aModifiers, aKey, scanCode);
+}
+
+void ToggleUIFromGamepad()
+{
+    if (!s_pOverlay || !s_pOverlay->GetInGame())
+        return;
+
+    const auto pApp = s_pOverlay->GetOverlayApp();
+    if (!pApp)
+        return;
+
+    const auto pClient = pApp->GetClient();
+    if (!pClient)
+        return;
+
+    const auto pRenderer = pClient->GetOverlayRenderHandler();
+    if (!pRenderer)
+        return;
+
+    SetUIActive(*s_pOverlay, pRenderer, !s_pOverlay->GetActive());
 }
 
 void ProcessKeyboard(uint16_t aKey, uint16_t aScanCode, cef_key_event_type_t aType, bool aE0, bool aE1)
@@ -418,6 +573,7 @@ LRESULT CALLBACK InputService::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 }
 
 InputService::InputService(OverlayService& aOverlay) noexcept
+    : m_gamepadToggle(LoadGamepadToggleBinding())
 {
     s_pOverlay = &aOverlay;
     s_currentACP = GetRealACP();
@@ -425,5 +581,98 @@ InputService::InputService(OverlayService& aOverlay) noexcept
 
 InputService::~InputService() noexcept
 {
+    SetGameInputBlocked(false);
     s_pOverlay = nullptr;
+}
+
+void InputService::Update() noexcept
+{
+    const auto getState = GetXInputGetState();
+    if (!getState)
+        return;
+
+    XINPUT_STATE state{};
+    if (getState(0, &state) != ERROR_SUCCESS)
+    {
+        m_previousGamepadButtons = 0;
+        m_gamepadNavigation = 0;
+        return;
+    }
+
+    const auto buttons = state.Gamepad.wButtons;
+    const auto previousButtons = m_previousGamepadButtons;
+    m_previousGamepadButtons = buttons;
+
+    if (!s_pOverlay || !s_pOverlay->GetInGame())
+    {
+        SetGameInputBlocked(false);
+        return;
+    }
+
+    if (m_gamepadToggle.IsPressed(buttons, previousButtons))
+    {
+        ToggleUIFromGamepad();
+        m_gamepadNavigation = 0;
+        return;
+    }
+
+    if (!s_pOverlay->GetActive())
+        return;
+
+    const auto pressedButtons = static_cast<uint16_t>(buttons & ~previousButtons);
+    if (pressedButtons & XINPUT_GAMEPAD_A)
+        InjectCefKey(VK_RETURN);
+    if (pressedButtons & XINPUT_GAMEPAD_B)
+    {
+        // Match the existing keyboard Escape behavior: close the overlay and return control to the game.
+        const auto scanCode = static_cast<uint16_t>(MapVirtualKey(VK_ESCAPE, MAPVK_VK_TO_VSC));
+        ProcessKeyboard(VK_ESCAPE, scanCode, KEYEVENT_KEYDOWN, false, false);
+        ProcessKeyboard(VK_ESCAPE, scanCode, KEYEVENT_KEYUP, false, false);
+        return;
+    }
+
+    const auto navigation = GetGamepadNavigation(state.Gamepad);
+    const auto now = std::chrono::steady_clock::now();
+    if (navigation != m_gamepadNavigation)
+    {
+        m_gamepadNavigation = navigation;
+        m_nextGamepadRepeat = now + std::chrono::milliseconds(300);
+    }
+    else if (navigation && now < m_nextGamepadRepeat)
+    {
+        return;
+    }
+    else if (navigation)
+    {
+        m_nextGamepadRepeat = now + std::chrono::milliseconds(100);
+    }
+
+    if (navigation)
+        InjectCefKey(VK_TAB, navigation < 0 ? EVENTFLAG_SHIFT_DOWN : EVENTFLAG_NONE);
+}
+
+void InputService::SetGameInputBlocked(const bool aBlocked) noexcept
+{
+    const auto pPlayerControls = PlayerControls::GetInstance();
+    if (!pPlayerControls)
+    {
+        if (!aBlocked)
+            s_gameInputStateSaved = false;
+        return;
+    }
+
+    if (aBlocked)
+    {
+        if (!s_gameInputStateSaved)
+        {
+            s_gameInputWasBlocked = pPlayerControls->bBlockPlayerInput;
+            s_gameInputStateSaved = true;
+        }
+        pPlayerControls->SetBlockPlayerInput(true);
+    }
+    else if (s_gameInputStateSaved)
+    {
+        pPlayerControls->SetBlockPlayerInput(s_gameInputWasBlocked);
+        s_gameInputStateSaved = false;
+    }
 }

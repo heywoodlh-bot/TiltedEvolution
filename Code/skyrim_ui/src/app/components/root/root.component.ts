@@ -12,6 +12,7 @@ import {
   fontSizeToPixels,
 } from '../../services/setting.service';
 import { Sound, SoundService } from '../../services/sound.service';
+import { StoreService } from '../../services/store.service';
 import { UiRepository } from '../../store/ui.repository';
 import { ChatComponent } from '../chat/chat.component';
 import { GroupComponent } from '../group/group.component';
@@ -53,6 +54,7 @@ export class RootComponent implements OnInit {
     private readonly destroy$: DestroyService,
     private readonly client: ClientService,
     private readonly sound: SoundService,
+    private readonly storeService: StoreService,
     private readonly uiRepository: UiRepository,
     private readonly translocoService: TranslocoService,
     private readonly settingService: SettingService,
@@ -122,7 +124,26 @@ export class RootComponent implements OnInit {
   }
 
   public reconnect(): void {
-    this.client.reconnect();
+    const address = this.storeService
+      .get('last_connected_address', '')
+      .trim()
+      .match(/^(.+?)(?::([0-9]+))?$/);
+
+    if (!address) {
+      this.setView(View.CONNECT);
+      return;
+    }
+
+    this.sound.play(Sound.Ok);
+    this.client.connect(
+      address[1],
+      address[2] ? Number.parseInt(address[2]) : 10578,
+      this.storeService.get('last_connected_password', ''),
+    );
+  }
+
+  public hasSavedConnection(): boolean {
+    return this.storeService.get('last_connected_address', '').trim() !== '';
   }
 
   public revealPlayers(): void {
